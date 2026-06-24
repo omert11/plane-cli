@@ -8,6 +8,36 @@ use crate::config::Config;
 
 const UA: &str = concat!("plane-cli/", env!("CARGO_PKG_VERSION"));
 
+/// A typed error carrying the HTTP status, so callers can branch on the actual
+/// status code (e.g. fall back on a real 404) instead of string-matching the
+/// formatted message — the message embeds the raw server body and is not stable.
+#[derive(Debug)]
+pub struct PlaneApiError {
+    pub status: StatusCode,
+    pub message: String,
+}
+
+impl std::fmt::Display for PlaneApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for PlaneApiError {}
+
+impl PlaneApiError {
+    pub fn is_not_found(&self) -> bool {
+        self.status == StatusCode::NOT_FOUND
+    }
+}
+
+/// True when an `anyhow::Error` is a Plane API 404. Callers use this to decide
+/// whether to retry against an alternate endpoint path.
+pub fn is_not_found(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<PlaneApiError>()
+        .is_some_and(|e| e.is_not_found())
+}
+
 /// HTTP client for the Plane REST API (`/api/v1`).
 ///
 /// Auth is the `X-Api-Key` header. All resource paths are workspace-scoped, so
@@ -55,6 +85,25 @@ impl PlaneClient {
         format!("/workspaces/{}/{}", self.workspace, suffix)
     }
 
+    /// Resolve a possibly-relative asset URL against the instance origin.
+    /// Plane sometimes returns an absolute URL and sometimes a relative path/key
+    /// (e.g. `/plane-uploads/...`); absolute inputs are returned unchanged.
+    pub fn absolute_url(&self, url: &str) -> String {
+        if url.starts_with("http://") || url.starts_with("https://") {
+            return url.to_string();
+        }
+        // base_url is `{origin}/api/v1`; strip the api suffix to get the origin.
+        let origin = self
+            .base_url
+            .strip_suffix("/api/v1")
+            .unwrap_or(&self.base_url);
+        format!(
+            "{}/{}",
+            origin.trim_end_matches('/'),
+            url.trim_start_matches('/')
+        )
+    }
+
     pub async fn request<Q: Serialize + ?Sized, B: Serialize + ?Sized>(
         &self,
         method: Method,
@@ -99,6 +148,92 @@ impl PlaneClient {
     pub async fn delete(&self, path: &str) -> Result<Value> {
         self.request::<(), ()>(Method::DELETE, path, None, None)
             .await
+    }
+
+    /// Upload raw bytes to an object-storage (MinIO / S3) presigned POST.
+    ///
+    /// Plane does not receive the file itself: an attachment request returns a
+    /// presigned `url` plus signed `fields`, and the file is POSTed straight to
+    /// storage as `multipart/form-data`. The order matters — every signed field
+    /// goes first and `file` **last** (S3 policies are order-sensitive). This
+    /// call must NOT carry the Plane `X-Api-Key` / JSON `Content-Type` headers,
+    /// so it uses a bare request (no `default_headers` auth is sent because the
+    /// target host differs and storage rejects unexpected signed headers).
+    pub async fn upload_to_storage(
+        &self,
+        url: &str,
+        fields: &serde_json::Map<String, Value>,
+        file_name: &str,
+        mime: &str,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        let mut form = reqwest::multipart::Form::new();
+        // Signed fields first, in the order the server provided them.
+        for (k, v) in fields {
+            let val = match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            form = form.text(k.clone(), val);
+        }
+        // `file` part last; name + content-type echo what we declared on presign.
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(file_name.to_string())
+            .mime_str(mime)
+            .context("Invalid MIME type for upload")?;
+        form = form.part("file", part);
+
+        // Fresh client: storage rejects the JSON Content-Type / X-Api-Key that
+        // our default headers carry; only the UA is worth keeping for CF.
+        let resp = reqwest::Client::new()
+            .post(url)
+            .header(USER_AGENT, UA)
+            .multipart(form)
+            .send()
+            .await
+            .context("Storage upload request failed")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Storage upload failed ({status}){}",
+                if body.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {body}")
+                }
+            ));
+        }
+        Ok(())
+    }
+
+    /// Fetch raw bytes from an absolute URL (e.g. a presigned download URL).
+    /// Carries the UA but no Plane auth headers — presigned URLs are
+    /// self-authenticating.
+    pub async fn download_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let resp = reqwest::Client::new()
+            .get(url)
+            .header(USER_AGENT, UA)
+            .send()
+            .await
+            .context("Download request failed")?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Download failed ({status}){}",
+                if body.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {body}")
+                }
+            ));
+        }
+        Ok(resp
+            .bytes()
+            .await
+            .context("Failed to read download body")?
+            .to_vec())
     }
 }
 
@@ -150,9 +285,10 @@ async fn handle_response(resp: Response) -> Result<Value> {
         StatusCode::UNPROCESSABLE_ENTITY => "Unprocessable (422)",
         _ => "Plane API error",
     };
-    if !body.is_empty() && body.trim() != msg.trim() {
-        Err(anyhow!("{prefix}: {msg}\n--- raw: {body}"))
+    let message = if !body.is_empty() && body.trim() != msg.trim() {
+        format!("{prefix}: {msg}\n--- raw: {body}")
     } else {
-        Err(anyhow!("{prefix}: {msg}"))
-    }
+        format!("{prefix}: {msg}")
+    };
+    Err(anyhow!(PlaneApiError { status, message }))
 }

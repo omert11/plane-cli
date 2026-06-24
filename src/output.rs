@@ -4,7 +4,9 @@ use comfy_table::{presets::UTF8_FULL, Cell, ContentArrangement, Table};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::types::{Comment, Cycle, Label, Member, Module, Page, Project, State, WorkItem};
+use crate::types::{
+    Attachment, Comment, Cycle, Label, Member, Module, Page, Project, State, WorkItem,
+};
 use crate::util::truncate;
 
 pub fn emit_json<T: Serialize>(value: &T) -> Result<()> {
@@ -199,6 +201,56 @@ pub fn print_page_table(items: &[Page]) {
     }
     println!("{table}");
     footer(items.len(), "pages");
+}
+
+// ---- Attachments ----
+
+pub fn print_attachment_table(items: &[Attachment]) {
+    let mut table = base_table();
+    table.set_header(vec!["ID", "Asset", "Name", "Size", "Type", "Uploaded"]);
+    for a in items {
+        let (name, size, mime) = match &a.attributes {
+            Some(attr) => (
+                attr.name.as_deref().unwrap_or("-").to_string(),
+                attr.size.map(human_size).unwrap_or_else(|| "-".into()),
+                attr.mime_type.as_deref().unwrap_or("-").to_string(),
+            ),
+            None => ("-".into(), "-".into(), "-".into()),
+        };
+        table.add_row(vec![
+            Cell::new(truncate(&a.id, 36)),
+            Cell::new(truncate(a.asset_id.as_deref().unwrap_or("-"), 36)),
+            Cell::new(truncate(&name, 40)),
+            Cell::new(size),
+            Cell::new(mime),
+            Cell::new(if a.is_uploaded.unwrap_or(false) {
+                "✓"
+            } else {
+                ""
+            }),
+        ]);
+    }
+    println!("{table}");
+    footer(items.len(), "attachments");
+}
+
+/// Render a byte count compactly (e.g. 12896 → "12.6 KB").
+pub fn human_size(bytes: i64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if bytes < 0 {
+        return bytes.to_string();
+    }
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[0])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
 }
 
 // ---- Members ----

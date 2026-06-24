@@ -44,6 +44,10 @@ pub enum PageCmd {
     },
 }
 
+// TODO: inline image support for pages. Pages have no parent work item, so the
+// issue-attachment presign flow does not apply; a project-level asset endpoint
+// would be needed and is not yet verified against this Plane instance.
+
 pub async fn run(cmd: PageCmd, client: &PlaneClient, json: bool) -> Result<()> {
     match cmd {
         PageCmd::List { project } => list(client, &project, json).await,

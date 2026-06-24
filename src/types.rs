@@ -150,6 +150,33 @@ pub struct WorkItemLink {
     pub created_at: Option<String>,
 }
 
+/// A file attachment on a work item. Plane nests the file metadata under
+/// `attributes` ({name, size, type}); `id` is the attachment record UUID and
+/// `asset_id` the stored object's UUID (used as the inline `image-component`
+/// src). `is_uploaded` is false until the presigned upload is confirmed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: String,
+    #[serde(default)]
+    pub asset_id: Option<String>,
+    #[serde(default)]
+    pub attributes: Option<AttachmentAttributes>,
+    #[serde(default)]
+    pub is_uploaded: Option<bool>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentAttributes {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub size: Option<i64>,
+    #[serde(rename = "type", default)]
+    pub mime_type: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Me {
     #[serde(default)]

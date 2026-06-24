@@ -37,9 +37,12 @@ pub enum CommentCmd {
         /// Work-item (issue) UUID
         #[arg(long)]
         issue: String,
-        /// Comment body in HTML format
+        /// Comment body in HTML format (optional when --image is given)
         #[arg(long)]
-        comment_html: String,
+        comment_html: Option<String>,
+        /// Attach an image file and embed it inline in the comment
+        #[arg(long)]
+        image: Option<String>,
     },
     /// Update an existing comment
     Update {
@@ -76,7 +79,8 @@ pub async fn run(cmd: CommentCmd, client: &PlaneClient, json: bool) -> Result<()
             project,
             issue,
             comment_html,
-        } => add(client, &project, &issue, comment_html, json).await,
+            image,
+        } => add(client, &project, &issue, comment_html, image, json).await,
         CommentCmd::Update {
             id,
             project,
@@ -120,18 +124,51 @@ async fn add(
     client: &PlaneClient,
     project: &str,
     issue: &str,
-    comment_html: String,
+    comment_html: Option<String>,
+    image: Option<String>,
     json: bool,
 ) -> Result<()> {
+    // Require at least one of --comment-html / --image. An explicitly-passed
+    // empty body (`--comment-html ""` → Some("")) is still honoured for
+    // backward compatibility; only the both-absent case is rejected.
+    if comment_html.is_none() && image.is_none() {
+        anyhow::bail!("Provide --comment-html and/or --image");
+    }
+
+    // Build the body: optional text plus, when --image is given, the uploaded
+    // asset embedded as an inline image-component node.
+    let mut html = comment_html.unwrap_or_default();
+    if let Some(file) = image.as_deref() {
+        let up = super::attachment::upload_file(client, project, issue, file).await?;
+        html.push_str(&util::image_component_html(&up.asset_id));
+
+        // The image is already attached to the issue; if the comment POST
+        // fails, roll it back so we don't leave an orphan attachment behind.
+        let path = client.ws_path(&format!("projects/{project}/work-items/{issue}/comments"));
+        let body = json!({ "comment_html": html });
+        let value = match client.post(&path, Some(&body)).await {
+            Ok(v) => v,
+            Err(e) => {
+                super::attachment::delete_asset(client, project, issue, &up.asset_id).await;
+                return Err(e.context("Comment failed; rolled back the uploaded image"));
+            }
+        };
+        return finish(value, html, json);
+    }
+
     let path = client.ws_path(&format!("projects/{project}/work-items/{issue}/comments"));
-    let body = json!({ "comment_html": comment_html });
+    let body = json!({ "comment_html": html });
     let value = client.post(&path, Some(&body)).await?;
+    finish(value, html, json)
+}
+
+fn finish(value: Value, html: String, json: bool) -> Result<()> {
     if json {
         output::emit_value(&value)
     } else {
         let item: Comment = serde_json::from_value(value).unwrap_or_else(|_| Comment {
             id: String::new(),
-            comment_html: Some(comment_html),
+            comment_html: Some(html),
             comment_stripped: None,
             actor: None,
             created_at: None,

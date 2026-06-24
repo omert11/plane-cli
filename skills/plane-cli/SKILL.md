@@ -1,6 +1,6 @@
 ---
 name: plane-cli
-description: Plane project management için CLI wrapper skill. plane-cli Rust binary'sini doğru komutlarla çağırır - project/issue/state/label/comment/cycle/module/intake/page/worklog/link/member. Her zaman --json kullanıp parse eder.
+description: Plane project management için CLI wrapper skill. plane-cli Rust binary'sini doğru komutlarla çağırır - project/issue/state/label/comment/cycle/module/intake/page/worklog/link/member/attachment. Her zaman --json kullanıp parse eder.
 when_to_use: Plane iş takibi - issue/proje yönetimi, work item oluşturma/güncelleme, cycle/module yönetimi, üye arama. Tetikleme - "issue oluştur", "work item listele", "PROJ-123 getir", "issue ara", "cycle'a ekle", "yorum ekle", "plane projeleri", "/plane-cli".
 allowed-tools: Bash(plane-cli *) Read
 ---
@@ -110,11 +110,15 @@ plane-cli label delete <UUID> --project <UUID>          # DESTRUCTIVE
 ```bash
 plane-cli comment list --project <UUID> --issue <issue-UUID>
 plane-cli comment add  --project <UUID> --issue <issue-UUID> --comment-html "<p>Merhaba</p>"   # HTML!
+plane-cli comment add  --project <UUID> --issue <issue-UUID> --image /path/shot.png            # görseli yorum içine göm
 plane-cli comment update <comment-UUID> ...
 plane-cli comment delete <comment-UUID> ...             # DESTRUCTIVE
 ```
 
 > `--comment-html` body **HTML** ister — düz metni `<p>...</p>` ile sar.
+> `--image` görseli önce issue'ya attachment olarak yükler, sonra yorum gövdesine
+> inline gömer. `--comment-html` ve `--image` birlikte ya da tek tek verilebilir
+> (ikisi de yoksa hata). Yorum POST başarısız olursa yüklenen görsel geri alınır.
 
 ### Cycle (sprint) / Module
 
@@ -158,6 +162,21 @@ plane-cli link list   --project <UUID> --issue <issue-UUID>
 plane-cli link create "https://..." --project <UUID> --issue <issue-UUID> --title "Tasarım"
 plane-cli link remove <link-UUID> --project <UUID> --issue <issue-UUID>
 ```
+
+### Attachment (dosya eki / inline görsel)
+
+```bash
+plane-cli attachment add  --project <UUID> --issue <issue-UUID> --file /path/shot.png            # yükle (presign→upload→confirm)
+plane-cli attachment add  --project <UUID> --issue <issue-UUID> --file /path/shot.png --inline    # + issue açıklamasına göm
+plane-cli attachment list --project <UUID> --issue <issue-UUID>
+plane-cli attachment download <attachment-UUID> --project <UUID> --issue <issue-UUID> [--out path] [--force]
+plane-cli attachment delete   <attachment-UUID> --project <UUID> --issue <issue-UUID>             # DESTRUCTIVE
+```
+
+> `add` 3 adımı (presigned URL → object storage upload → confirm) tek komutta yapar;
+> MIME uzantıdan tespit edilir. `--inline` asset'i `<image-component>` ile issue
+> `description_html`'ine ekler (mevcut gövde korunur). `download` varsayılan olarak
+> mevcut dosyanın üzerine yazmaz — `--force` veya `--out` ile yön ver.
 
 ### Member / Me
 

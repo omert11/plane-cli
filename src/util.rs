@@ -39,6 +39,34 @@ pub fn insert_opt_csv_array(body: &mut Map<String, Value>, key: &str, value: Opt
     }
 }
 
+/// Guess a MIME type from a file's extension, falling back to
+/// `application/octet-stream`. Backed by `mime_guess` (already compiled into the
+/// binary via reqwest), so the extension table stays in one maintained place.
+pub fn mime_from_path(path: &str) -> String {
+    mime_guess::from_path(path)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_string()
+}
+
+/// The base file name of a path (e.g. `/a/b/c.png` → `c.png`). Used as the
+/// asset `name` reported to Plane on upload.
+pub fn file_name_of(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
+/// Build the Plane editor inline-image node for an uploaded asset. Plane stores
+/// the asset UUID (not a URL) in `src`; the editor resolves it at render time.
+pub fn image_component_html(asset_id: &str) -> String {
+    format!(
+        "<image-component src=\"{asset_id}\" width=\"35%\" height=\"auto\" aspect_ratio=\"null\"></image-component>"
+    )
+}
+
 /// A work-item human identifier like `PROJ-123` (project identifier + sequence).
 pub struct WorkItemIdent {
     pub project_identifier: String,
@@ -85,5 +113,36 @@ mod tests {
     fn splits_csv() {
         assert_eq!(split_csv("a, b ,c"), vec!["a", "b", "c"]);
         assert!(split_csv("  , ").is_empty());
+    }
+
+    #[test]
+    fn detects_mime() {
+        assert_eq!(mime_from_path("/x/y/shot.PNG"), "image/png");
+        assert_eq!(mime_from_path("a.jpeg"), "image/jpeg");
+        assert_eq!(mime_from_path("doc.pdf"), "application/pdf");
+        assert_eq!(mime_from_path("noext"), "application/octet-stream");
+        // An extension mime_guess does not recognise falls back to octet-stream.
+        assert_eq!(mime_from_path("weird.zzqq"), "application/octet-stream");
+    }
+
+    #[test]
+    fn file_name_strips_path_traversal() {
+        // download() relies on file_name_of to neutralise embedded paths.
+        assert_eq!(file_name_of("../../etc/passwd"), "passwd");
+        assert_eq!(file_name_of("a/b/../c.png"), "c.png");
+    }
+
+    #[test]
+    fn extracts_file_name() {
+        assert_eq!(file_name_of("/a/b/c.png"), "c.png");
+        assert_eq!(file_name_of("c.png"), "c.png");
+    }
+
+    #[test]
+    fn builds_image_component() {
+        let html = image_component_html("abc-123");
+        assert!(html.contains("src=\"abc-123\""));
+        assert!(html.starts_with("<image-component"));
+        assert!(html.ends_with("</image-component>"));
     }
 }

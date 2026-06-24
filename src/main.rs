@@ -9,7 +9,8 @@ mod types;
 mod util;
 
 use commands::{
-    comment, cycle, intake, issue, label, link, member, module, page, project, state, worklog,
+    attachment, comment, cycle, intake, issue, label, link, member, module, page, project, state,
+    worklog,
 };
 
 #[derive(Parser)]
@@ -82,6 +83,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: link::LinkCmd,
     },
+    /// Work item file attachment / inline image operations
+    Attachment {
+        #[command(subcommand)]
+        cmd: attachment::AttachmentCmd,
+    },
     /// Member operations (workspace / project) + current user (`member me`)
     Member {
         #[command(subcommand)]
@@ -107,6 +113,7 @@ async fn main() -> Result<()> {
         Commands::Page { cmd } => page::run(cmd, &client, cli.json).await,
         Commands::Worklog { cmd } => worklog::run(cmd, &client, cli.json).await,
         Commands::Link { cmd } => link::run(cmd, &client, cli.json).await,
+        Commands::Attachment { cmd } => attachment::run(cmd, &client, cli.json).await,
         Commands::Member { cmd } => member::run(cmd, &client, cli.json).await,
     }
 }
