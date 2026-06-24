@@ -38,6 +38,9 @@ pub enum IssueCmd {
         /// Description (plain text; wrapped into HTML)
         #[arg(long)]
         description: Option<String>,
+        /// Description as raw HTML (sent verbatim; takes precedence over --description)
+        #[arg(long)]
+        description_html: Option<String>,
         /// Priority: urgent, high, medium, low, none
         #[arg(long)]
         priority: Option<String>,
@@ -70,6 +73,9 @@ pub enum IssueCmd {
         /// Description (plain text; wrapped into HTML)
         #[arg(long)]
         description: Option<String>,
+        /// Description as raw HTML (sent verbatim; takes precedence over --description)
+        #[arg(long)]
+        description_html: Option<String>,
         /// Priority: urgent, high, medium, low, none
         #[arg(long)]
         priority: Option<String>,
@@ -172,6 +178,7 @@ pub async fn run(cmd: IssueCmd, client: &PlaneClient, json: bool) -> Result<()> 
             project,
             name,
             description,
+            description_html,
             priority,
             state,
             assignees,
@@ -184,6 +191,7 @@ pub async fn run(cmd: IssueCmd, client: &PlaneClient, json: bool) -> Result<()> 
                 &project,
                 name,
                 description,
+                description_html,
                 priority,
                 state,
                 assignees,
@@ -199,6 +207,7 @@ pub async fn run(cmd: IssueCmd, client: &PlaneClient, json: bool) -> Result<()> 
             id,
             name,
             description,
+            description_html,
             priority,
             state,
             assignees,
@@ -212,6 +221,7 @@ pub async fn run(cmd: IssueCmd, client: &PlaneClient, json: bool) -> Result<()> 
                 &id,
                 name,
                 description,
+                description_html,
                 priority,
                 state,
                 assignees,
@@ -314,6 +324,7 @@ async fn create(
     project: &str,
     name: String,
     description: Option<String>,
+    description_html: Option<String>,
     priority: Option<String>,
     state: Option<String>,
     assignees: Option<String>,
@@ -325,9 +336,7 @@ async fn create(
     let mut body = Map::new();
     body.insert("name".into(), json!(name));
 
-    // Plane stores description as HTML; wrap plain text in a paragraph.
-    if let Some(desc) = description {
-        let html = format!("<p>{}</p>", html_escape(&desc));
+    if let Some(html) = resolve_description_html(description, description_html) {
         body.insert("description_html".into(), json!(html));
     }
 
@@ -368,6 +377,7 @@ async fn update(
     id: &str,
     name: Option<String>,
     description: Option<String>,
+    description_html: Option<String>,
     priority: Option<String>,
     state: Option<String>,
     assignees: Option<String>,
@@ -379,8 +389,7 @@ async fn update(
     let mut body = Map::new();
     util::insert_opt_str(&mut body, "name", name);
 
-    if let Some(desc) = description {
-        let html = format!("<p>{}</p>", html_escape(&desc));
+    if let Some(html) = resolve_description_html(description, description_html) {
         body.insert("description_html".into(), json!(html));
     }
 
@@ -593,10 +602,54 @@ async fn list_archived(client: &PlaneClient, project: &str, json: bool) -> Resul
 
 // ---- helpers ----
 
+/// Pick the `description_html` body value from the two description flags.
+///
+/// `--description-html` wins and is sent verbatim (caller already wrote HTML).
+/// `--description` is plain text: escaped and wrapped in a paragraph so the
+/// markup renders instead of leaking literal `<tags>` into the issue body.
+/// Returns `None` when neither flag is set, leaving the field untouched.
+fn resolve_description_html(
+    description: Option<String>,
+    description_html: Option<String>,
+) -> Option<String> {
+    match description_html {
+        Some(html) => Some(html),
+        None => description.map(|desc| format!("<p>{}</p>", html_escape(&desc))),
+    }
+}
+
 /// Minimal HTML entity escaping for plain-text → HTML conversion.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn description_html_is_sent_verbatim() {
+        let out = resolve_description_html(None, Some("<h2>Sorun</h2>".into()));
+        assert_eq!(out.as_deref(), Some("<h2>Sorun</h2>"));
+    }
+
+    #[test]
+    fn description_html_takes_precedence_over_plain() {
+        let out = resolve_description_html(Some("plain".into()), Some("<p><b>rich</b></p>".into()));
+        assert_eq!(out.as_deref(), Some("<p><b>rich</b></p>"));
+    }
+
+    #[test]
+    fn plain_description_is_escaped_and_wrapped() {
+        let out = resolve_description_html(Some("a < b & \"c\"".into()), None);
+        assert_eq!(out.as_deref(), Some("<p>a &lt; b &amp; &quot;c&quot;</p>"));
+    }
+
+    #[test]
+    fn no_description_leaves_field_untouched() {
+        assert_eq!(resolve_description_html(None, None), None);
+    }
 }

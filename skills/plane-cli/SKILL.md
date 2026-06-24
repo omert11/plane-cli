@@ -69,15 +69,20 @@ plane-cli issue count --project <UUID>
 
 # Create (DESTRUCTIVE — onay al)
 plane-cli issue create "Fix login redirect" --project <UUID> \
-  --description "..." \
+  --description "düz metin — escape edilip <p> içine sarılır" \   # düz metin
   --priority high \                                     # urgent|high|medium|low|none
   --state <state-UUID> \
   --assignees <user-UUID>,<user-UUID> \
   --labels <label-UUID>,<label-UUID> \
   --start-date 2026-06-23 --target-date 2026-06-30
 
+# Zengin biçimli açıklama (başlık/kod bloğu/kalın) → --description-html (HTML escape ETMEZ)
+plane-cli issue create "GSA komisyon hatası" --project <UUID> \
+  --description-html "<h2>Sorun</h2><p>GSA <b>%0 komisyon</b> tanımlayamıyor.</p><pre><code>parseFloat(x) === 0</code></pre>"
+
 # Update (DESTRUCTIVE — onay al; assignees/labels LİSTEYİ DEĞİŞTİRİR, eklemez)
 plane-cli issue update <issue-UUID> --project <UUID> --priority urgent --state <state-UUID>
+plane-cli issue update <issue-UUID> --project <UUID> --description-html "<h2>Güncelleme</h2><p>...</p>"
 
 # Assignee / Label — incremental ekle/çıkar (update'in aksine listeyi korur)
 plane-cli issue assignee <issue-UUID> --project <UUID> --add <user-UUID> --remove <user-UUID>
@@ -202,12 +207,18 @@ plane-cli --json member me | jq .email
 ## Akış Örneği — "Bu sorun için issue aç"
 
 1. Proje belli değilse `project list` → doğru proje UUID'sini bul (gerekirse `AskUserQuestion`)
-2. Title + description çıkar
+2. Title + açıklama çıkar. **Açıklama biçimi seçimi (KRİTİK)**:
+   - Başlık/kod bloğu/kalın/liste gibi **zengin biçimlendirme** gerekiyorsa → `--description-html`
+     ile **HTML gövdesi** ver (`<h2>...</h2><p>...</p><pre><code>...</code></pre>`).
+   - **Sadece düz metin** ise → `--description` (CLI escape edip `<p>` ile sarar).
+   - **ASLA `--description`'a HTML markup'ı yazma** — escape edilip `&lt;h2&gt;` gibi ham etiket
+     olarak görünür (render olmaz). HTML her zaman `--description-html` ile gider.
 3. `AskUserQuestion`:
    - header: "Issue"
    - question: "Plane'de yeni work item oluşturayım mı?"
    - options: ["Evet, oluştur", "Hayır"]
-4. Onay → `plane-cli issue create "..." --project <UUID> --priority medium --description "..."`
+4. Onay → düz metin: `plane-cli issue create "..." --project <UUID> --priority medium --description "..."`
+   zengin: `plane-cli issue create "..." --project <UUID> --priority medium --description-html "<h2>...</h2><p>...</p>"`
 5. Dönen `id` (UUID) + identifier'ı (`PROJ-N`) kullanıcıya bildir
 
 ## Akış Örneği — "Sprint'e şu issue'ları ekle"
@@ -240,8 +251,10 @@ plane-cli --json member me | jq .email
 - **Tarihler ISO 8601**: `2026-06-23` formatı.
 - **assignee/label flag farkı**: `issue update --assignees` listeyi **değiştirir** (replace),
   `issue assignee --add/--remove` listeyi **korur** (incremental). Tek kişi eklerken `assignee` kullan.
-- **HTML alanları**: `comment add --comment-html`, `page create --description-html` HTML ister —
-  düz metni `<p>...</p>` ile sar.
+- **HTML alanları**: `comment add --comment-html`, `page create --description-html`,
+  `issue create/update --description-html` HTML'i **escape ETMEDEN** gönderir (render olur).
+  Buna karşılık `issue create/update --description` düz metindir — CLI escape edip `<p>` ile sarar,
+  bu yüzden **HTML'i `--description`'a yazma** (ham `&lt;tag&gt;` olarak görünür).
 - **worklog dakika**: `worklog create <dakika>` — pozitif tam sayı (dakika cinsinden).
 - **DESTRUCTIVE komutlar**: create/update/delete/archive — her zaman `AskUserQuestion` ile onay al.
 
