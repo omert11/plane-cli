@@ -61,6 +61,26 @@ pub enum AttachmentCmd {
         #[arg(long)]
         issue: String,
     },
+    /// Download the inline images embedded in a work item's description.
+    ///
+    /// Description images (`<image-component>`) are a different asset type than
+    /// attachments and never show up in `attachment list`. This reads the issue's
+    /// `description_html`, finds each embedded asset, and downloads it via the
+    /// workspace asset endpoint.
+    DownloadInline {
+        /// Project UUID
+        #[arg(long)]
+        project: String,
+        /// Work-item (issue) UUID
+        #[arg(long)]
+        issue: String,
+        /// Directory to save the images into (created if missing; defaults to cwd)
+        #[arg(long)]
+        out_dir: Option<String>,
+        /// Overwrite destination files if they already exist
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 pub async fn run(cmd: AttachmentCmd, client: &PlaneClient, json: bool) -> Result<()> {
@@ -82,6 +102,12 @@ pub async fn run(cmd: AttachmentCmd, client: &PlaneClient, json: bool) -> Result
         AttachmentCmd::Delete { id, project, issue } => {
             delete(client, &project, &issue, &id, json).await
         }
+        AttachmentCmd::DownloadInline {
+            project,
+            issue,
+            out_dir,
+            force,
+        } => download_inline(client, &project, &issue, out_dir, force, json).await,
     }
 }
 
@@ -357,6 +383,117 @@ async fn download(
         output::emit_value(&json!({ "saved": dest, "bytes": bytes.len() }))
     } else {
         output::print_message(&format!("Saved {dest} ({} bytes)", bytes.len()));
+        Ok(())
+    }
+}
+
+/// Resolve a workspace asset's presigned download URL via the public asset
+/// endpoint (`GET /workspaces/{slug}/assets/{id}/`). The endpoint returns
+/// `{ asset_url, asset_name, asset_type, … }` where `asset_url` is a presigned
+/// link; we hand that to [`download_bytes`](PlaneClient::download_bytes).
+///
+/// Some self-hosted instances ship an asset endpoint that 500s because the
+/// bundled `S3Storage` does not accept the `is_server` kwarg the view passes
+/// (a server-side version mismatch, not a CLI bug). When that happens the
+/// caller can't recover, so we surface a pointed error instead of a bare 500.
+async fn fetch_inline_asset_url(client: &PlaneClient, asset_id: &str) -> Result<(String, String)> {
+    let path = client.ws_path(&format!("assets/{asset_id}"));
+    let value = client.get::<()>(&path, None).await.map_err(|e| {
+        if e.downcast_ref::<crate::client::PlaneApiError>()
+            .is_some_and(|err| err.status.is_server_error())
+        {
+            anyhow!(
+                "Asset endpoint returned a server error for {asset_id}. This Plane \
+                 instance's workspace asset download is broken (the bundled S3Storage \
+                 rejects the `is_server` argument the API passes — a server-side fix \
+                 is required). Original error:\n{e}"
+            )
+        } else {
+            e
+        }
+    })?;
+
+    let url = value
+        .get("asset_url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Asset response for {asset_id} has no asset_url:\n{value}"))?;
+    // The download name Plane records for this asset (falls back to the UUID).
+    let name = value
+        .get("asset_name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(util::file_name_of)
+        .unwrap_or_else(|| asset_id.to_string());
+    Ok((client.absolute_url(url), name))
+}
+
+/// Download every inline `image-component` asset embedded in an issue's
+/// description into `out_dir`. Files are named after the asset's stored name,
+/// prefixed with the asset UUID to guarantee uniqueness (two pasted images can
+/// share the name `image.png`).
+async fn download_inline(
+    client: &PlaneClient,
+    project: &str,
+    issue: &str,
+    out_dir: Option<String>,
+    force: bool,
+    json: bool,
+) -> Result<()> {
+    // 1. Read the issue description and pull out the inline asset UUIDs.
+    let issue_path = client.ws_path(&format!("projects/{project}/work-items/{issue}"));
+    let current = client.get::<()>(&issue_path, None).await?;
+    let html = current
+        .get("description_html")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let asset_ids = util::extract_inline_asset_ids(html);
+
+    if asset_ids.is_empty() {
+        if json {
+            return output::emit_value(&json!({ "saved": [], "count": 0 }));
+        }
+        output::print_message("No inline images found in this work item's description");
+        return Ok(());
+    }
+
+    // 2. Ensure the destination directory exists.
+    let dir = out_dir.unwrap_or_else(|| ".".to_string());
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .with_context(|| format!("Failed to create output directory {dir:?}"))?;
+
+    // 3. Resolve + download each asset. Prefix the UUID so same-named pastes
+    //    don't collide on disk.
+    let mut saved = Vec::new();
+    for asset_id in &asset_ids {
+        let (url, name) = fetch_inline_asset_url(client, asset_id)
+            .await
+            .with_context(|| format!("Failed to resolve inline asset {asset_id}"))?;
+        let short = asset_id.split('-').next().unwrap_or(asset_id);
+        let file_name = format!("{short}-{name}");
+        let dest = std::path::Path::new(&dir).join(&file_name);
+
+        if !force && tokio::fs::try_exists(&dest).await.unwrap_or(false) {
+            return Err(anyhow!(
+                "{} already exists — pass --force to overwrite",
+                dest.display()
+            ));
+        }
+
+        let bytes = client.download_bytes(&url).await?;
+        tokio::fs::write(&dest, &bytes)
+            .await
+            .with_context(|| format!("Failed to write {}", dest.display()))?;
+        let dest_str = dest.to_string_lossy().to_string();
+        if !json {
+            output::print_message(&format!("Saved {dest_str} ({} bytes)", bytes.len()));
+        }
+        saved.push(json!({ "asset_id": asset_id, "saved": dest_str, "bytes": bytes.len() }));
+    }
+
+    if json {
+        output::emit_value(&json!({ "saved": saved, "count": asset_ids.len() }))
+    } else {
         Ok(())
     }
 }

@@ -175,6 +175,7 @@ plane-cli attachment add  --project <UUID> --issue <issue-UUID> --file /path/sho
 plane-cli attachment add  --project <UUID> --issue <issue-UUID> --file /path/shot.png --inline    # + issue açıklamasına göm
 plane-cli attachment list --project <UUID> --issue <issue-UUID>
 plane-cli attachment download <attachment-UUID> --project <UUID> --issue <issue-UUID> [--out path] [--force]
+plane-cli attachment download-inline --project <UUID> --issue <issue-UUID> [--out-dir dir] [--force]   # açıklamadaki gömülü görseller
 plane-cli attachment delete   <attachment-UUID> --project <UUID> --issue <issue-UUID>             # DESTRUCTIVE
 ```
 
@@ -182,6 +183,16 @@ plane-cli attachment delete   <attachment-UUID> --project <UUID> --issue <issue-
 > MIME uzantıdan tespit edilir. `--inline` asset'i `<image-component>` ile issue
 > `description_html`'ine ekler (mevcut gövde korunur). `download` varsayılan olarak
 > mevcut dosyanın üzerine yazmaz — `--force` veya `--out` ile yön ver.
+>
+> **`download-inline`** issue açıklamasına gömülü görselleri indirir. Bunlar
+> attachment DEĞİL ayrı bir asset tipi (`<image-component>` node'ları,
+> entity_type `ISSUE_DESCRIPTION`) — `attachment list`'te GÖRÜNMEZ. Komut
+> `description_html`'i okur, her gömülü asset'i `GET /workspaces/{slug}/assets/{id}/`
+> ile çözer (presigned URL → indir) ve `<out-dir>/<uuid-kısa>-<isim>` olarak kaydeder.
+> NOT: Bazı self-hosted instance'larda asset download endpoint'i 500 verir
+> (bundled `S3Storage` API'nin geçtiği `is_server` argümanını reddediyor — sunucu
+> tarafı düzeltmesi gerekir). Komut bu durumda çıplak 500 yerine kök nedeni
+> açıklayan net bir hata döndürür.
 
 ### Member / Me
 

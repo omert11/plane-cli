@@ -67,6 +67,51 @@ pub fn image_component_html(asset_id: &str) -> String {
     )
 }
 
+/// Extract the asset UUIDs of inline `image-component` nodes embedded in an
+/// issue's `description_html`, in document order, de-duplicated.
+///
+/// Plane's editor stores inline images as `<image-component src="<uuid>" …>`
+/// where `src` is the stored asset's UUID (not a URL — the editor resolves it at
+/// render time). These assets are a distinct entity type (`ISSUE_DESCRIPTION`)
+/// from work-item attachments, so they never appear in the attachment list and
+/// need their own download path.
+///
+/// The parse is deliberately a lightweight scan rather than a full HTML parse:
+/// we only need the `src` attribute of each `<image-component>` tag, and the
+/// markup Plane emits is stable. Attribute order varies (`src` may not be
+/// first), so we locate each tag then read its `src="…"` regardless of position.
+pub fn extract_inline_asset_ids(description_html: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut rest = description_html;
+    while let Some(start) = rest.find("<image-component") {
+        // Bound the search to this single tag so a later tag's `src` can't leak
+        // into an earlier tag that happens to lack one.
+        let after = &rest[start + "<image-component".len()..];
+        let tag_end = after.find('>').unwrap_or(after.len());
+        let tag = &after[..tag_end];
+        if let Some(src) = read_attr(tag, "src") {
+            if !src.is_empty() && !ids.contains(&src) {
+                ids.push(src);
+            }
+        }
+        // Advance past this tag's `>` (or to end if malformed) to avoid looping.
+        rest = &after[tag_end.min(after.len())..];
+    }
+    ids
+}
+
+/// Read a single `name="value"` attribute out of a tag's inner text (the slice
+/// between `<image-component` and the next `>`). Returns the value without
+/// quotes, or `None` if the attribute is absent. Only double-quoted values are
+/// supported — that is what Plane emits.
+fn read_attr(tag: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=\"");
+    let at = tag.find(&needle)? + needle.len();
+    let val = &tag[at..];
+    let end = val.find('"')?;
+    Some(val[..end].to_string())
+}
+
 /// A work-item human identifier like `PROJ-123` (project identifier + sequence).
 pub struct WorkItemIdent {
     pub project_identifier: String,
@@ -136,6 +181,27 @@ mod tests {
     fn extracts_file_name() {
         assert_eq!(file_name_of("/a/b/c.png"), "c.png");
         assert_eq!(file_name_of("c.png"), "c.png");
+    }
+
+    #[test]
+    fn extracts_inline_asset_ids() {
+        // Two image-components with src after other attributes, plus surrounding
+        // editor markup — mirrors a real Plane description_html.
+        let html = r#"<p>before</p><image-component data-id="node-1" src="aaa-111" width="299px"></image-component><p>mid</p><image-component data-id="node-2" src="bbb-222" status="uploaded"></image-component>"#;
+        assert_eq!(extract_inline_asset_ids(html), vec!["aaa-111", "bbb-222"]);
+    }
+
+    #[test]
+    fn inline_asset_ids_dedup_and_skip_missing() {
+        // Duplicate src collapses to one; a tag with no src is skipped (not panic).
+        let html = r#"<image-component src="dup"></image-component><image-component></image-component><image-component src="dup"></image-component>"#;
+        assert_eq!(extract_inline_asset_ids(html), vec!["dup"]);
+    }
+
+    #[test]
+    fn inline_asset_ids_empty_when_none() {
+        assert!(extract_inline_asset_ids("<p>plain text, no images</p>").is_empty());
+        assert!(extract_inline_asset_ids("").is_empty());
     }
 
     #[test]
