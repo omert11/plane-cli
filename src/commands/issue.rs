@@ -14,6 +14,20 @@ pub enum IssueCmd {
         /// Project UUID
         #[arg(long)]
         project: String,
+        /// Comma-separated relations to expand into full objects
+        /// (e.g. labels,state,assignees)
+        #[arg(long)]
+        expand: Option<String>,
+        /// Comma-separated fields to return (server-side projection,
+        /// e.g. id,name,labels)
+        #[arg(long)]
+        fields: Option<String>,
+        /// Filter by state UUID (client-side; the API ignores state query params)
+        #[arg(long)]
+        state: Option<String>,
+        /// Filter by label UUID (client-side)
+        #[arg(long)]
+        label: Option<String>,
     },
     /// Get a work item by UUID
     Get {
@@ -171,7 +185,13 @@ pub enum IssueCmd {
 
 pub async fn run(cmd: IssueCmd, client: &PlaneClient, json: bool) -> Result<()> {
     match cmd {
-        IssueCmd::List { project } => list(client, &project, json).await,
+        IssueCmd::List {
+            project,
+            expand,
+            fields,
+            state,
+            label,
+        } => list(client, &project, expand, fields, state, label, json).await,
         IssueCmd::Get { project, id } => get(client, &project, &id, json).await,
         IssueCmd::GetId { ident } => get_by_ident(client, &ident, json).await,
         IssueCmd::Create {
@@ -255,11 +275,121 @@ pub async fn run(cmd: IssueCmd, client: &PlaneClient, json: bool) -> Result<()> 
 
 // ---- list ----
 
-async fn list(client: &PlaneClient, project: &str, json: bool) -> Result<()> {
+async fn list(
+    client: &PlaneClient,
+    project: &str,
+    expand: Option<String>,
+    fields: Option<String>,
+    state: Option<String>,
+    label: Option<String>,
+    json: bool,
+) -> Result<()> {
     let path = client.ws_path(&format!("projects/{project}/work-items"));
-    let value = client.get::<()>(&path, None).await?;
-    let items: Vec<WorkItem> = serde_json::from_value(unwrap_results(value)).unwrap_or_default();
-    output::render(&items, json, |v| output::print_work_item_table(v))
+
+    // A --fields projection must not silently strip fields the table renderer
+    // (`id`) or the client-side filters (`state`/`labels`) depend on — that
+    // would render an empty result with no hint why.
+    let mut required: Vec<&str> = Vec::new();
+    if !json {
+        required.push("id");
+    }
+    if state.is_some() {
+        required.push("state");
+    }
+    if label.is_some() {
+        required.push("labels");
+    }
+    let fields = fields.map(|f| ensure_fields(f, &required));
+
+    let mut base_query: Vec<(&str, String)> = Vec::new();
+    if let Some(e) = expand {
+        base_query.push(("expand", e));
+    }
+    if let Some(f) = fields {
+        base_query.push(("fields", f));
+    }
+
+    // Follow the pagination cursor so multi-page responses return every item.
+    // Page size is server-determined (self-hosted Plane serves up to 1000 per
+    // page, so a single request usually suffices).
+    let mut items: Vec<Value> = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut query = base_query.clone();
+        if let Some(c) = &cursor {
+            query.push(("cursor", c.clone()));
+        }
+        let value = client.get(&path, Some(&query)).await?;
+        let has_next = value
+            .get("next_page_results")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let next_cursor = value
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .map(String::from);
+        if let Value::Array(mut page) = unwrap_results(value) {
+            items.append(&mut page);
+        }
+        match (has_next, next_cursor) {
+            // Only continue while the cursor actually advances — a server
+            // echoing the same cursor with next_page_results=true would
+            // otherwise loop forever.
+            (true, Some(c)) if cursor.as_ref() != Some(&c) => cursor = Some(c),
+            _ => break,
+        }
+    }
+
+    apply_filters(&mut items, state.as_deref(), label.as_deref());
+
+    if json {
+        // Raw payload: keeps every field the API returned (labels, assignees,
+        // expanded relations, …) instead of the trimmed WorkItem projection.
+        return output::emit_value(&Value::Array(items));
+    }
+    let items: Vec<WorkItem> = items
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect();
+    output::print_work_item_table(&items);
+    Ok(())
+}
+
+/// Append `required` field names missing from a `--fields` projection.
+fn ensure_fields(fields: String, required: &[&str]) -> String {
+    let mut parts = util::split_csv(&fields);
+    for r in required {
+        if !parts.iter().any(|p| p == r) {
+            parts.push((*r).to_string());
+        }
+    }
+    parts.join(",")
+}
+
+/// Client-side `--state` / `--label` filtering. The community API ignores
+/// these as query params on the list endpoint, so they are applied after
+/// fetching — still a single list round-trip for the caller.
+fn apply_filters(items: &mut Vec<Value>, state: Option<&str>, label: Option<&str>) {
+    if let Some(sid) = state {
+        items.retain(|v| matches_id(v.get("state"), sid));
+    }
+    if let Some(lid) = label {
+        items.retain(|v| {
+            v.get("labels")
+                .and_then(Value::as_array)
+                .is_some_and(|arr| arr.iter().any(|l| matches_id(Some(l), lid)))
+        });
+    }
+}
+
+/// True when `value` references the given UUID — either as a bare string or as
+/// an object carrying an `id` (the shape `expand` switches relations to).
+fn matches_id(value: Option<&Value>, id: &str) -> bool {
+    match value {
+        Some(Value::String(s)) => s == id,
+        Some(Value::Object(map)) => map.get("id").and_then(Value::as_str) == Some(id),
+        _ => false,
+    }
 }
 
 // ---- get ----
@@ -651,5 +781,64 @@ mod tests {
     #[test]
     fn no_description_leaves_field_untouched() {
         assert_eq!(resolve_description_html(None, None), None);
+    }
+
+    #[test]
+    fn ensure_fields_appends_missing_only() {
+        assert_eq!(
+            ensure_fields("name,sequence_id".into(), &["id", "state"]),
+            "name,sequence_id,id,state"
+        );
+        assert_eq!(ensure_fields("id,name".into(), &["id"]), "id,name");
+        assert_eq!(ensure_fields("id".into(), &[]), "id");
+    }
+
+    #[test]
+    fn apply_filters_matches_bare_and_expanded_shapes() {
+        let base = vec![
+            json!({"id": "1", "state": "s1", "labels": ["l1"]}),
+            json!({"id": "2", "state": {"id": "s2"}, "labels": [{"id": "l2"}]}),
+            json!({"id": "3", "state": "s1", "labels": []}),
+        ];
+
+        let mut items = base.clone();
+        apply_filters(&mut items, Some("s2"), None);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "2");
+
+        let mut items = base.clone();
+        apply_filters(&mut items, None, Some("l1"));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "1");
+
+        let mut items = base;
+        apply_filters(&mut items, Some("s1"), Some("l1"));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "1");
+    }
+
+    #[test]
+    fn apply_filters_drops_items_missing_the_filtered_field() {
+        // Items lacking the filtered field never match — the documented edge
+        // ensure_fields() protects against for --fields projections.
+        let mut items = vec![json!({"id": "1"})];
+        apply_filters(&mut items, Some("s1"), None);
+        assert!(items.is_empty());
+
+        let mut items = vec![json!({"id": "1"})];
+        apply_filters(&mut items, None, Some("l1"));
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn matches_id_on_bare_string_and_object() {
+        let s = json!("abc-123");
+        let o = json!({"id": "abc-123", "name": "Onay Bekliyor"});
+        assert!(matches_id(Some(&s), "abc-123"));
+        assert!(matches_id(Some(&o), "abc-123"));
+        assert!(!matches_id(Some(&s), "other"));
+        assert!(!matches_id(Some(&o), "other"));
+        assert!(!matches_id(None, "abc-123"));
+        assert!(!matches_id(Some(&Value::Null), "abc-123"));
     }
 }

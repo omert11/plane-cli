@@ -62,6 +62,13 @@ plane-cli project delete <UUID>       # DESTRUCTIVE — onay al
 
 ```bash
 plane-cli issue list --project <UUID>
+# list, --json'da API'nin TÜM alanlarını döner (labels/assignees dahil) ve
+# pagination'ı otomatik takip eder — issue başına ayrı `issue get` GEREKMEZ
+plane-cli --json issue list --project <UUID> \
+  --expand labels,state,assignees \    # ID yerine tam obje (isim/renk dahil)
+  --fields id,sequence_id,name,labels \# server-side alan projeksiyonu
+  --state <state-UUID> \               # state filtresi (client-side uygulanır)
+  --label <label-UUID>                 # label filtresi (client-side uygulanır)
 plane-cli issue get <issue-UUID> --project <UUID>
 plane-cli issue get-id PROJ-123                         # human ident → UUID çözer
 plane-cli issue search "login bug" --limit 50          # workspace genelinde free-text
